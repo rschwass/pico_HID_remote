@@ -1,20 +1,18 @@
 import time
 import json
-import board
-import wifi
+import wifi # type: ignore
 import socketpool
-import usb_hid
-from adafruit_hid.keyboard import Keyboard
-from adafruit_hid.keycode import Keycode
-
-import config  # Import the config.py file
+import ssl
+import config  # Wi-Fi & Server Config
+from hid_controller import send_key, send_string, send_special_combo  # Import HID functions
 
 print("Starting...")
 
 # Wi-Fi Credentials
 SSID = config.SSID
 PASSWORD = config.PASSWORD
-SERVER_BASE_URL = config.API_URL
+SERVER_HOST = config.SERVER_HOST  # Your server's IP or hostname
+SERVER_PORT = config.SERVER_PORT  # The SSL port (e.g., 4433)
 
 # Connect to Wi-Fi
 print(f"Connecting to {SSID}...")
@@ -27,111 +25,55 @@ except Exception as e:
     time.sleep(10)
     raise SystemExit("Exiting due to Wi-Fi connection failure.")
 
-# Send GET request with IP as a parameter
+# Set up socket pool
 pool = socketpool.SocketPool(wifi.radio)
 
-# Start HID Keyboard
-kbd = Keyboard(usb_hid.devices)
+def fetch_ssl_data():
+    """Connect to the SSL server and fetch JSON data."""
+    print(f"Connecting to {SERVER_HOST}:{SERVER_PORT} using SSL...")
 
-# Special Key Combos
-SPECIAL_KEYS = {
-    "CTRL_ALT_DEL": [Keycode.CONTROL, Keycode.ALT, Keycode.DELETE],
-    "ALT_F4": [Keycode.ALT, Keycode.F4],
-    "CTRL_C": [Keycode.CONTROL, Keycode.C],
-}
+    try:
+        # Create a socket
+        sock = pool.socket()
+        
+        # Wrap socket with SSL
+        ssl_context = ssl.create_default_context()
+        ssl_sock = ssl_context.wrap_socket(sock, server_hostname=SERVER_HOST)
 
-# Create and set up a TCP socket server
-server = pool.socket()
-server.bind(('0.0.0.0', 5000))  # Bind to all available interfaces on port 5000
-server.listen(1)  # Start listening for connections
+        # Connect to the SSL server
+        ssl_sock.connect((SERVER_HOST, SERVER_PORT))
 
-print("Server running on IP: {0}, Port 5000... Waiting for connections.".format(ip_address))
+        # Receive data
+        response = ssl_sock.recv(1024).decode('utf-8')
+        ssl_sock.close()  # Close the connection
 
-def send_key(key_name):
-    key = getattr(Keycode, key_name.upper(), None)
-    if key:
-        # Check if the key is uppercase, and use SHIFT if necessary
-        if key_name.isupper():
-            kbd.press(Keycode.SHIFT)
-            kbd.send(key)
-            kbd.release(Keycode.SHIFT)
-        else:
-            kbd.send(key)
-        return f"Sent key: {key_name}"
-    return "Invalid key"
+        # Parse the JSON response
+        data = json.loads(response)
+        print(f"Received JSON: {data}")
+        return data
 
-def send_string(text):
-    for char in text:
-        if char.isupper():  # If the character is uppercase
-            kbd.press(Keycode.SHIFT)  # Press the Shift key
-            if char.upper() in Keycode.__dict__:
-                kbd.send(getattr(Keycode, char.upper()))
-            kbd.release(Keycode.SHIFT)  # Release the Shift key after sending the character
-        else:
-            if char.upper() in Keycode.__dict__:
-                kbd.send(getattr(Keycode, char.upper()))
-        time.sleep(0.1)  # Small delay
-    return f"Sent string: {text}"
-
-def send_special_combo(combo_name):
-    combo = SPECIAL_KEYS.get(combo_name.upper())
-    if combo:
-        kbd.press(*combo)
-        time.sleep(0.1)
-        kbd.release_all()
-        return f"Sent special combo: {combo_name}"
-    return "Invalid special combo"
+    except Exception as e:
+        print(f"SSL Error: {e}")
+        return None
 
 while True:
     try:
-        print("Waiting for a client to connect...")
-        conn, addr = server.accept()
-        print(f"Connection from {addr}")
+        data = fetch_ssl_data()
 
-        # Create a buffer for receiving data
-        buffer = bytearray(1024)  # Allocate 1024 bytes for the incoming data
+        if data:
+            if "key" in data:
+                response = send_key(data["key"])
+            elif "string" in data:
+                response = send_string(data["string"])
+            elif "special" in data:
+                response = send_special_combo(data["special"])
+            else:
+                response = "Invalid request"
 
-        while True:  # Keep the connection open
-            try:
-                # Receive JSON data into the buffer
-                length = conn.recv_into(buffer)  # Receive data into the buffer
-                if length > 0:
-                    # Process the received data (only the valid part)
-                    request_data = buffer[:length]  # Slice the buffer to the received data length
+            print(response)  # Log the action performed
 
-                    try:
-                        data = json.loads(request_data)
-                        print(f"Received JSON: {data}")
-
-                        # Handle key, string, and special combo based on the payload
-                        if "key" in data:
-                            response = send_key(data["key"])
-                        elif "string" in data:
-                            response = send_string(data["string"])
-                        elif "special" in data:
-                            response = send_special_combo(data["special"])
-                        else:
-                            response = "Invalid request"
-
-                    except ValueError:
-                        response = "Invalid JSON"
-                    except Exception as e:
-                        response = f"Error: {str(e)}"
-
-                    # Send the response back to the client
-                    conn.sendall(response.encode('utf-8'))
-
-                else:
-                    print("No data received, closing connection...")
-                    break  # No data received, close connection
-
-            except Exception as e:
-                print(f"Error during communication: {str(e)}")
-                break  # Exit inner loop on error
-
-        # Close the connection after handling the communication loop
-        conn.close()
+        time.sleep(5)  # Poll the server every 5 seconds
 
     except Exception as e:
         print(f"Error: {str(e)}")
-        time.sleep(1)  # Sleep before trying again
+        time.sleep(5)
