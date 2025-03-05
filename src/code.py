@@ -5,7 +5,6 @@ import wifi
 import socketpool
 import usb_hid
 import adafruit_requests
-from adafruit_httpserver import Server, Request, Response, GET
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
 
@@ -50,9 +49,13 @@ SPECIAL_KEYS = {
     "CTRL_C": [Keycode.CONTROL, Keycode.C],
 }
 
-# Start HTTP Server
-#server = pool.socket()
-server = Server(pool, "/static", debug=True)
+# Create and set up a TCP socket server
+server_socket = socketpool.SocketPool(wifi.radio)
+server = server_socket.socket(socketpool.AF_INET, socketpool.SOCK_STREAM)
+server.bind(('0.0.0.0', 5000))  # Bind to all available interfaces on port 5000
+server.listen(1)  # Start listening for connections
+
+print("Server running on IP: {0}, Port 5000... Waiting for connections.".format(ip_address))
 
 def send_key(key_name):
     key = getattr(Keycode, key_name.upper(), None)
@@ -77,15 +80,50 @@ def send_special_combo(combo_name):
         return f"Sent special combo: {combo_name}"
     return "Invalid special combo"
 
-print("Server running... Listening for requests.")
+while True:
+    try:
+        print("Waiting for a client to connect...")
+        conn, addr = server.accept()
+        print(f"Connection from {addr}")
 
-@server.route("/", GET)
-def base(request: Request):  # pylint: disable=unused-argument
-    #  serve the HTML f string
-    #  with content type text/html
-    return Response(request, f"ok", content_type='text/html')
+        while True:  # Keep the connection open
+            try:
+                # Receive JSON data from the client
+                request_data = conn.recv(1024)  # Read 1024 bytes at a time
+                if request_data:
+                    try:
+                        data = json.loads(request_data)
+                        print(f"Received JSON: {data}")
 
+                        # Handle key, string, and special combo based on the payload
+                        if "key" in data:
+                            response = send_key(data["key"])
+                        elif "string" in data:
+                            response = send_string(data["string"])
+                        elif "special" in data:
+                            response = send_special_combo(data["special"])
+                        else:
+                            response = "Invalid request"
 
+                    except json.JSONDecodeError:
+                        response = "Invalid JSON"
+                    except Exception as e:
+                        response = f"Error: {str(e)}"
 
+                    # Send the response back to the client
+                    conn.sendall(response.encode('utf-8'))
 
-server.serve_forever(str(wifi.radio.ipv4_address))
+                else:
+                    print("No data received, closing connection...")
+                    break  # No data received, close connection
+
+            except Exception as e:
+                print(f"Error during communication: {str(e)}")
+                break  # Exit inner loop on error
+
+        # Close the connection after handling the communication loop
+        conn.close()
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        time.sleep(1)  # Sleep before trying again
