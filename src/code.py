@@ -4,7 +4,6 @@ import board
 import wifi
 import socketpool
 import usb_hid
-import adafruit_requests
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
 
@@ -26,18 +25,10 @@ try:
 except Exception as e:
     print(f"Wi-Fi Error: {e}")
     time.sleep(10)
-    exit()
+    raise SystemExit("Exiting due to Wi-Fi connection failure.")
 
 # Send GET request with IP as a parameter
 pool = socketpool.SocketPool(wifi.radio)
-requests = adafruit_requests.Session(pool)
-
-try:
-    url = f"{SERVER_BASE_URL}?ip={ip_address}"
-    response = requests.get(url)
-    print(f"Server Response: {response.text}")
-except Exception as e:
-    print(f"Failed to send request: {e}")
 
 # Start HID Keyboard
 kbd = Keyboard(usb_hid.devices)
@@ -50,8 +41,7 @@ SPECIAL_KEYS = {
 }
 
 # Create and set up a TCP socket server
-server_socket = socketpool.SocketPool(wifi.radio)
-server = server_socket.socket(socketpool.AF_INET, socketpool.SOCK_STREAM)
+server = pool.socket()
 server.bind(('0.0.0.0', 5000))  # Bind to all available interfaces on port 5000
 server.listen(1)  # Start listening for connections
 
@@ -60,14 +50,26 @@ print("Server running on IP: {0}, Port 5000... Waiting for connections.".format(
 def send_key(key_name):
     key = getattr(Keycode, key_name.upper(), None)
     if key:
-        kbd.send(key)
+        # Check if the key is uppercase, and use SHIFT if necessary
+        if key_name.isupper():
+            kbd.press(Keycode.SHIFT)
+            kbd.send(key)
+            kbd.release(Keycode.SHIFT)
+        else:
+            kbd.send(key)
         return f"Sent key: {key_name}"
     return "Invalid key"
 
 def send_string(text):
     for char in text:
-        if char.upper() in Keycode.__dict__:
-            kbd.send(getattr(Keycode, char.upper()))
+        if char.isupper():  # If the character is uppercase
+            kbd.press(Keycode.SHIFT)  # Press the Shift key
+            if char.upper() in Keycode.__dict__:
+                kbd.send(getattr(Keycode, char.upper()))
+            kbd.release(Keycode.SHIFT)  # Release the Shift key after sending the character
+        else:
+            if char.upper() in Keycode.__dict__:
+                kbd.send(getattr(Keycode, char.upper()))
         time.sleep(0.1)  # Small delay
     return f"Sent string: {text}"
 
@@ -86,11 +88,17 @@ while True:
         conn, addr = server.accept()
         print(f"Connection from {addr}")
 
+        # Create a buffer for receiving data
+        buffer = bytearray(1024)  # Allocate 1024 bytes for the incoming data
+
         while True:  # Keep the connection open
             try:
-                # Receive JSON data from the client
-                request_data = conn.recv(1024)  # Read 1024 bytes at a time
-                if request_data:
+                # Receive JSON data into the buffer
+                length = conn.recv_into(buffer)  # Receive data into the buffer
+                if length > 0:
+                    # Process the received data (only the valid part)
+                    request_data = buffer[:length]  # Slice the buffer to the received data length
+
                     try:
                         data = json.loads(request_data)
                         print(f"Received JSON: {data}")
@@ -105,7 +113,7 @@ while True:
                         else:
                             response = "Invalid request"
 
-                    except json.JSONDecodeError:
+                    except ValueError:
                         response = "Invalid JSON"
                     except Exception as e:
                         response = f"Error: {str(e)}"
